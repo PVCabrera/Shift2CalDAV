@@ -1,23 +1,25 @@
 #!/usr/bin/env python
-import re
-import datetime
-from datetime import datetime, date, timedelta
+# ===== Standard Library =====
 import configparser
-import time
+import datetime
+from datetime import date, datetime, timedelta
+import os
+import re
 import sys
+import time
 
-from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-
-
+# ===== Third-Party Libraries =====
+from google.auth.transport.requests import Request
 from google.oauth2 import credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-import os
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
@@ -94,7 +96,6 @@ class Shift:
 #####################################
 #####   CHROME  STUFF  UPDATED  #####
 #####################################
-
 
 config = configparser.ConfigParser()
 config.read("credentials.cfg")
