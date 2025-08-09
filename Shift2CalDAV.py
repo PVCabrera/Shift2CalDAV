@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-
+import re
 import datetime
 from datetime import datetime, date, timedelta
 import configparser
 import time
+import sys
 
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
@@ -12,221 +13,319 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-import caldav
 
-# from caldav.elements import dav, cdav
-# pylint suggest cdav unused
-from caldav.elements import dav
+from google.oauth2 import credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+import os
 
-from ics import Calendar, Event
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# unused
-# from dateutil import tz
+CALENDAR_ID = '4dfeb9415d043a280c8f88c6f51c97e97c79577d2ace7c226620e66daa4b9040@group.calendar.google.com'
+
+def get_calendar_service():
+    creds = None
+    if os.path.exists("token.json"):
+        creds = credentials.Credentials.from_authorized_user_file("token.json", SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+    return build("calendar", "v3", credentials=creds)
 
 
-# get calendar specific info from credentials.cfg
-config = configparser.ConfigParser()
-config.read("credentials.cfg")
-davurl = config['url']['address']
-davname = config['url']['user']
-davpass = config['url']['pass']
-calname = config['url']['name']
-
-client = caldav.DAVClient(url=davurl, username=davname, password=davpass)
-# a principal holds calendars, there can be multiple
-principal = client.principal()
-calendars = principal.calendars()
-calendar = calendars[0]
-# since there can be multiple calendars, we need the one that is matched
-# in our URL from credentials.cfg
-# note:  if correct calendar is not found, the first calendar from the
-# principal will be used.  This may be undesirable!
-for i in calendars:
-    if calname in i.get_properties(props=[dav.Href()])["{DAV:}href"]:
-        calendar = i
-        break
-
+service = get_calendar_service()
 
 class Shift:
-    ''' A Shift has a start and end date and can add events to the global calendar'''
-
     def __init__(self, day, date, position, start_time, end_time):
         self.day = day
-        self.date = date
+        self.date = date  # YYYY-MM-DD string
         self.position = position
+        # Convert times to 24-hour format strings
         self.start_time = datetime.strptime(start_time, "%I:%M%p").strftime("%H:%M:%S")
         self.end_time = datetime.strptime(end_time, "%I:%M%p").strftime("%H:%M:%S")
+        self.location = location
 
     def make_event(self):
+        start_dt = datetime.strptime(
+            f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S"
+        )
+        end_dt = datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S")
 
-        ics = Calendar()
-        event = Event()
+        event_body = {
+            "summary": f"Work - {self.position}",
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "America/Chicago",  # Adjust to your timezone
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "America/Chicago",
+            },
+        }
 
-        # check for existing work shift
-        # if there is one, delete it and replace with the new one
-        # because it's possible the shift has changed
-        split = self.date.split('-')
-        # print("looking in calendar for date: " + self.date)
+        # Search for existing "Work" events overlapping this shift to delete/update
+        events_result = (
+            service.events()
+            .list(
+                calendarId= CALENDAR_ID,
+                timeMin=start_dt.isoformat(),
+                timeMax=(start_dt + timedelta(days=1)).isoformat(),
+                singleEvents=True,
+            )
+            .execute()
+        )
 
-        try:
-            todayshift = calendar.date_search(datetime(int(split[0]),
-                                                       int(split[1]),
-                                                       int(split[2])),
-                                              datetime(int(split[0]),
-                                                       int(split[1]),
-                                                       int(split[2]) + 1))
-        except ValueError:
-            print("it's next month for next day.")
-            todayshift = calendar.date_search(datetime(int(split[0]),
-                                                       int(split[1]),
-                                                       int(split[2])),
-                                              datetime(int(split[0]),
-                                                       int(split[1]) + 1, 1))
-        for e in todayshift:
-            e.load()
-            if "<SUMMARY{}work" in str(e.instance.vevent):
-                # print("deleting existing shift")
-                e.delete()
-        event.name = "work - " + self.position
-        event.begin = self.date + " " + self.start_time
-        event.end = self.date + " " + self.end_time
-        ics.events.add(event)
-        # we need to get rid of the Z in the times because it implies we're using UTC
-        # we are just using 'local' time, no time zone and ics module only supports UTC
-        calendar.add_event(str(ics).replace("Z", ""))
+        for e in events_result.get("items", []):
+            if e.get("summary", "").startswith("Work"):
+                service.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute()
+
+        created_event = (
+            service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
+        )
+        print(
+            f"Created event for {self.date} - {self.position}: {created_event.get('htmlLink')}"
+        )
+
+#####################################
+#####   CHROME  STUFF  UPDATED  #####
+#####################################
 
 
-##############################
-#####    CHROME  STUFF   #####
-##############################
+config = configparser.ConfigParser()
+config.read("credentials.cfg")
 
-if config['options']['headless'] == "yes":
-    print("headless mode enabled")
+if config["options"]["headless"] == "yes":
+    print("Headless mode enabled")
     options = webdriver.ChromeOptions()
-    options.add_argument('-headless')
+    options.add_argument("-headless")
     browser = webdriver.Chrome(options=options)
 else:
     browser = webdriver.Chrome()
 
-browser.get('http://wss.target.com/selfservice')
+browser.get(
+    "https://logonservices.iam.target.com/v1/login/?application=wfm_tm_enablement_ui_prod_im&assurance=2&form=password&referrer=https%3A%2F%2Foauth.iam.target.com%2Fauth%2Foauth%2Fv2%2Fauthorize%3Fclient_id%3Dwfm_tm_enablement_ui_prod_im%26login%3Dtrue%26nonce%3Dsn3WamWQw2sHie2gO8ypP%26redirect_uri%3Dhttps%3A%2F%2Fmytime.target.com%26response_type%3Dtoken+id_token%26scope%3Dopenid+profile%26state%3D&tid=cdeae68b-267e-4749-b8b0-916d478f4251&type=teammember+partner"
+)
+
 timeout = 20
-waittime = timeout
-try:
-    element_present = EC.presence_of_element_located((By.ID, 'loginID'))
-    WebDriverWait(browser, timeout).until(element_present)
-except TimeoutException:
-    print("Timed out waiting for page to load or login failed?")
-time.sleep(1)
-print("entering username and password...")
-username = browser.find_element_by_id("loginID")
-password = browser.find_element_by_id("pass")
-username.click()
-username.send_keys(config['secrets']['employeeID'])
-username.send_keys(Keys.TAB)
-username.click()
-password.send_keys(config['secrets']['password'])
-password.click()
-# password.send_keys(Keys.RETURN)
-loginbutton = browser.find_element_by_name("Login")
-loginbutton.submit()
-try:
-    element_present = EC.presence_of_element_located((By.ID, 'sec_qna'))
-    WebDriverWait(browser, timeout).until(element_present)
-except TimeoutException:
-    print("Timed out waiting for security question option.")
-time.sleep(1)
-print("selecting Q+A button...")
-# choose to answer security questions
-qna = browser.find_element_by_id('sec_qna')
-qna.click()
-login_attempt = browser.find_element_by_xpath("//*[@type='submit']")
-login_attempt.submit()
 
 try:
-    element_present = EC.presence_of_element_located((By.ID, 'answer0'))
-    WebDriverWait(browser, timeout).until(element_present)
+    print("Waiting for login page to load...")
+    WebDriverWait(browser, timeout).until(
+        EC.presence_of_element_located((By.ID, "loginID"))
+    )
 except TimeoutException:
-    print("Timed out waiting for actual security question.")
-time.sleep(1)
-print("answering security question...")
-answer = browser.find_element_by_id("answer0")
-# sort of hacky, but there are 3 possible security questions and we choose a "keyword"
-# out of each of the three, so like "what is your favorite restaurant?" we'd use restaurant
-# and search the page.  If it's on there, we submit the answer that we gave for restaurant
-# if the first 2 aren't on the page then we assume the third is what it's asking for and
-# submit that.
-if config['questions']['question1keyword'] in browser.page_source:
-    answer.send_keys(config['questions']['question1answer'])
-    # print("sending " + config['questions']['question1answer'] + " as answer")
-elif config['questions']['question2keyword'] in browser.page_source:
-    answer.send_keys(config['questions']['question2answer'])
-    # print("sending " + config['questions']['question2answer'] + " as answer")
+    print("Timed out waiting for login page to load or login failed?")
+    browser.quit()
+    exit(1)
+
+print("Entering username and password...")
+try:
+    username = browser.find_element(By.ID, "loginID")
+    password = browser.find_element(By.ID, "password")
+    username.send_keys(config["secrets"]["employeeID"])
+    username.send_keys(Keys.TAB)
+    password.send_keys(config["secrets"]["password"])
+except Exception as e:
+    print(f"Error entering login credentials: {e}")
+    browser.quit()
+    exit(1)
+
+try:
+    loginbutton = browser.find_element(By.ID, "submit-button")
+    loginbutton.submit()
+except Exception as e:
+    print(f"Error submitting login form: {e}")
+    browser.quit()
+    exit(1)
+# Check for in case of security question prompt
+try:
+    print("Waiting briefly for security question option...")
+    WebDriverWait(browser, 5).until(  # shorter wait here
+        EC.presence_of_element_located((By.ID, "sec_qna"))
+    )
+except TimeoutException:
+    print("No security question prompt found, continuing login flow.")
 else:
-    answer.send_keys(config['questions']['question3answer'])
-    # print("sending " + config['questions']['question3answer'] + " as answer")
+    print("Selecting Q+A button...")
+    try:
+        qna = browser.find_element(By.ID, "sec_qna")
+        qna.click()
+        login_attempt = browser.find_element(By.XPATH, "//*[@type='submit']")
+        login_attempt.submit()
+    except Exception as e:
+        print(f"Error handling security question selection: {e}")
+        browser.quit()
+        exit(1)
 
-submit = browser.find_element_by_id("submit-button")
-submit.click()
+    try:
+        print("Waiting for security question input...")
+        WebDriverWait(browser, timeout).until(
+            EC.presence_of_element_located((By.ID, "answer0"))
+        )
+    except TimeoutException:
+        print("Timed out waiting for security question input.")
+        browser.quit()
+        exit(1)
 
+    print("Answering security question...")
+    try:
+        answer = browser.find_element(By.ID, "answer0")
+        page_source = browser.page_source
+        if config["questions"]["question1keyword"] in page_source:
+            answer.send_keys(config["questions"]["question1answer"])
+        elif config["questions"]["question2keyword"] in page_source:
+            answer.send_keys(config["questions"]["question2answer"])
+        else:
+            answer.send_keys(config["questions"]["question3answer"])
+    except Exception as e:
+        print(f"Error answering security question: {e}")
+        browser.quit()
+        exit(1)
+
+    try:
+        submit = browser.find_element(By.ID, "submit-button")
+        submit.click()
+    except Exception as e:
+        print(f"Error submitting security question answer: {e}")
+        browser.quit()
+        exit(1)
+# check for in case of OTP prompt
 try:
-    element_present = EC.presence_of_element_located((By.CLASS_NAME, 'request_table_bordered'))
-    WebDriverWait(browser, timeout).until(element_present)
+    print("Checking for 2FA method selection (SMS/Call)...")
+    # Wait for the SMS button by looking for the button with text 'SMS'
+    sms_button = WebDriverWait(browser, 5).until(
+        EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='SMS']]"))
+    )
+    print("2FA SMS button found, clicking it...")
+    sms_button.click()
+    # Now wait for OTP input to show up
+    WebDriverWait(browser, timeout).until(
+        EC.presence_of_element_located(
+            (By.ID, "otp_input")
+        )  # Replace with your OTP input ID
+    )
 except TimeoutException:
-    print("Timed out waiting for schedule to appear.")
-time.sleep(1)
+    print("No 2FA method selection needed, continuing...")
+except Exception as e:
+    print(f"Error handling 2FA method selection: {e}")
+    browser.quit()
+    exit(1)
 
-table = browser.find_element_by_class_name("request_table_bordered")
+# Then your OTP input handling logic here...
+try:
+    print("Waiting for OTP input prompt...")
+    otp_input = browser.find_element(
+        By.ID, "otp_input"
+    )  # Replace with actual OTP input ID
+    otp_code = input("Enter OTP code: ")
+    otp_input.send_keys(otp_code)
+    otp_submit = browser.find_element(
+        By.ID, "otp_submit_button"
+    )  # Replace with actual button ID
+    otp_submit.click()
+    # Wait for schedule page or next step to load
+    WebDriverWait(browser, timeout).until(
+        EC.presence_of_element_located((By.CLASS_NAME, "request_table_bordered"))
+    )
+    print("OTP verified, continuing...")
+except TimeoutException:
+    print("No OTP prompt detected, continuing...")
+except Exception as e:
+    print(f"Error handling OTP: {e}")
+    browser.quit()
+    exit(1)
+try:
+    print("Waiting for 'My Schedule' button...")
+    schedule_btn = WebDriverWait(browser, timeout).until(
+        EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, 'a[data-cy="scheduleBtnBottomNav"]')
+        )
+    )
+    schedule_btn.click()
+    print("'My Schedule' button clicked, navigating to schedule page.")
+except Exception as e:
+    print(f"Failed to find or click 'My Schedule' button: {e}")
+    browser.quit()
+    exit(1)
 
-# current week
-if config['options']['thisweek'] == "yes":
-    for x in range(2, 9):
-        # this loop cycles through the week and assembles your shift information 
-        # and creates the event
-        days = browser.find_element_by_xpath \
-            ("//*[@id='page_content']/table[1]/tbody/tr[1]/td/table[3]/tbody/tr[1]/td["
-             + str(x) + "]")
-        shift = browser.find_element_by_xpath \
-            ("//*[@id='page_content']/table[1]/tbody/tr[1]/td/table[3]/tbody/tr[3]/td["
-             + str(x) + "]")
-        if not shift.text.strip():
+def parse_shift_label(label):
+    """
+    Parse the aria-label text from a shift element to extract shift info.
+    """
+    # Regex to capture:
+    # 1) position: anything before ' shift from '
+    # 2) start_time: time after ' shift from ' and before ' to '
+    # 3) end_time: time after ' to ' and before ' at location '
+    # 4) location: digits after ' at location ' and before ' on '
+    pattern = r"^(.*?) shift from (\d{1,2}:\d{2}[AP]M) to (\d{1,2}:\d{2}[AP]M) at location (\d+) on .*$"
+    match = re.match(pattern, label)
+    if not match:
+        raise ValueError(f"Could not parse shift label: {label}")
+
+    position = match.group(1)
+    start_time = match.group(2)
+    end_time = match.group(3)
+    location = match.group(4)
+
+    return position, start_time, end_time, location
+
+
+def process_shifts_new():
+    schedule_container = WebDriverWait(browser, timeout).until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, 'ul[aria-label="your weekly schedule"]')
+        )
+    )
+
+    day_items = schedule_container.find_elements(
+        By.CSS_SELECTOR, 'li[data-cy^="weeklySchedListItem"]'
+    )
+
+    for day_item in day_items:
+        date_elem = day_item.find_element(
+            By.CSS_SELECTOR, 'p[data-cy="nextSchedDisplaySegDateOnWeekly"]'
+        )
+        date_text = date_elem.text  # e.g., "Tuesday, August 5"
+
+        # Parse the date string to "YYYY-MM-DD"
+        date_obj = datetime.strptime(date_text, "%A, %B %d")
+        # NOTE: This returns a date without year, add year manually (e.g., this year)
+        date_obj = date_obj.replace(year=datetime.now().year)
+        formatted_date = date_obj.strftime("%Y-%m-%d")
+
+        shifts = day_item.find_elements(By.CSS_SELECTOR, 'a[aria-label*="shift"]')
+        if not shifts:
+            print(f"No shifts for {date_text}")
             continue
-        shift_info = (days.text + '\n' + shift.text)
-        # print(shift_info)
-        workday = Shift(shift_info.splitlines()[0],
-                        datetime.strptime(shift_info.splitlines()[1],
-                                          "%m/%d/%y").strftime("%Y-%m-%d"),
-                        shift_info.splitlines()[2],
-                        shift_info.splitlines()[3].split('-')[0].strip(),
-                        shift_info.splitlines()[3].split('-')[1].strip())
-        workday.make_event()
-        print("made shift for " + shift_info.splitlines()[0])
 
-# next week
-if config['options']['nextweek'] == "yes":
-    nextButton = browser.find_element_by_xpath \
-        ("//*[@id='page_content']/table[1]/tbody/tr[1]/td/table[2]/tbody/tr[1]/td/div/a[2]")
-    nextButton.click()
+        for shift in shifts:
+            shift_label = shift.get_attribute("aria-label")
+            try:
+                position, start_time, end_time, location = parse_shift_label(
+                    shift_label
+                )
+            except ValueError as e:
+                print(e)
+                continue
 
-    for x in range(2, 9):
-        # this loop cycles through the week and assembles your shift information
-        # and creates the event
-        days = browser.find_element_by_xpath \
-            ("//*[@id='page_content']/table[1]/tbody/tr[1]/td/table[3]/tbody/tr[1]/td["
-             + str(x) + "]")
-        shift = browser.find_element_by_xpath \
-            ("//*[@id='page_content']/table[1]/tbody/tr[1]/td/table[3]/tbody/tr[3]/td["
-             + str(x) + "]")
-        if not shift.text.strip() or "Unpaid" in shift.text.strip():
-            continue
-        shift_info = (days.text + '\n' + shift.text)
-        # print(shift_info)
-        workday = Shift(shift_info.splitlines()[0],
-                        datetime.strptime(shift_info.splitlines()[1],
-                                          "%m/%d/%y").strftime("%Y-%m-%d"),
-                        shift_info.splitlines()[2],
-                        shift_info.splitlines()[3].split('-')[0].strip(),
-                        shift_info.splitlines()[3].split('-')[1].strip())
-        workday.make_event()
-        print("made shift for " + shift_info.splitlines()[0])
+            # Create Shift object (adapt constructor as you have it)
+            shift_obj = Shift(
+                day=date_text,
+                date=formatted_date,
+                position=position,
+                start_time=start_time,
+                end_time=end_time,
+                location=location,  # if Shift accepts it, else ignore or extend Shift class
+            )
+            shift_obj.make_event()
+            print(
+                f"Created calendar event for {date_text} - {position} from {start_time} to {end_time} at location {location}"
+            )
+
 
 browser.quit()
