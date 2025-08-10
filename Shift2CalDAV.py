@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import pytz
 
 # ===== Third-Party Libraries =====
 from google.auth.transport.requests import Request
@@ -23,7 +24,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-CALENDAR_ID = '4dfeb9415d043a280c8f88c6f51c97e97c79577d2ace7c226620e66daa4b9040@group.calendar.google.com'
+CALENDAR_ID = "4dfeb9415d043a280c8f88c6f51c97e97c79577d2ace7c226620e66daa4b9040@group.calendar.google.com"
+
 
 def get_calendar_service():
     creds = None
@@ -39,24 +41,103 @@ def get_calendar_service():
             token.write(creds.to_json())
     return build("calendar", "v3", credentials=creds)
 
-
 service = get_calendar_service()
 
+def parse_shift_label(label):
+    """
+    Parse the aria-label text from a shift element to extract shift info.
+    """
+    # Regex to capture:
+    # 1) position: anything before ' shift from '
+    # 2) start_time: time after ' shift from ' and before ' to '
+    # 3) end_time: time after ' to ' and before ' at location '
+    # 4) location: digits after ' at location ' and before ' on '
+    pattern = r"^(.*?) shift from (\d{1,2}:\d{2}[AP]M) to (\d{1,2}:\d{2}[AP]M) at location (\d+) on .*$"
+    match = re.match(pattern, label)
+    if not match:
+        raise ValueError(f"Could not parse shift label: {label}")
+
+    position = match.group(1)
+    start_time = match.group(2)
+    end_time = match.group(3)
+    location = match.group(4)
+
+    return position, start_time, end_time, location
+
+
+
+
+def process_shifts_new():
+    schedule_container = WebDriverWait(browser, timeout).until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, 'ul[aria-label="your weekly schedule"]')
+        )
+    )
+
+    day_items = schedule_container.find_elements(
+        By.CSS_SELECTOR, 'li[data-cy^="weeklySchedListItem"]'
+    )
+
+    for day_item in day_items:
+        date_elem = day_item.find_element(
+            By.CSS_SELECTOR, 'p[data-cy="nextSchedDisplaySegDateOnWeekly"]'
+        )
+        date_text = date_elem.text  # e.g., "Tuesday, August 5"
+
+        # Parse the date string to "YYYY-MM-DD"
+        date_obj = datetime.strptime(date_text, "%A, %B %d")
+        # NOTE: This returns a date without year, add year manually (e.g., this year)
+        date_obj = date_obj.replace(year=datetime.now().year)
+        formatted_date = date_obj.strftime("%Y-%m-%d")
+
+        shifts = day_item.find_elements(By.CSS_SELECTOR, 'a[aria-label*="shift"]')
+        if not shifts:
+            print(f"No shifts for {date_text}")
+            continue
+
+        for shift in shifts:
+            shift_label = shift.get_attribute("aria-label")
+            try:
+                position, start_time, end_time, location = parse_shift_label(
+                    shift_label
+                )
+            except ValueError as e:
+                print(e)
+                continue
+
+            # Create Shift object (adapt constructor as you have it)
+            shift_obj = Shift(
+                day=date_text,
+                date=formatted_date,
+                position=position,
+                start_time=start_time,
+                end_time=end_time,
+                location=location,
+            )
+            shift_obj.make_event()
+            print(
+                f"Created calendar event for {date_text} - {position} from {start_time} to {end_time} at location {location}"
+            )
+
+
+# ===== Classes and Functions =====
+
+
 class Shift:
-    def __init__(self, day, date, position, start_time, end_time):
+    def __init__(self, day, date, position, start_time, end_time, location=None):
         self.day = day
         self.date = date  # YYYY-MM-DD string
         self.position = position
         # Convert times to 24-hour format strings
         self.start_time = datetime.strptime(start_time, "%I:%M%p").strftime("%H:%M:%S")
         self.end_time = datetime.strptime(end_time, "%I:%M%p").strftime("%H:%M:%S")
-        self.location = location
+        self.location = location  # Not used in event creation, but can be stored
 
     def make_event(self):
-        start_dt = datetime.strptime(
-            f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S"
-        )
-        end_dt = datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S")
+        tz = pytz.timezone("America/Chicago")
+        
+        start_dt = tz.localize(datetime.strptime(f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S"))
+        end_dt = tz.localize(datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S"))
 
         event_body = {
             "summary": f"Work - {self.position}",
@@ -74,7 +155,7 @@ class Shift:
         events_result = (
             service.events()
             .list(
-                calendarId= CALENDAR_ID,
+                calendarId=CALENDAR_ID,
                 timeMin=start_dt.isoformat(),
                 timeMax=(start_dt + timedelta(days=1)).isoformat(),
                 singleEvents=True,
@@ -84,7 +165,9 @@ class Shift:
 
         for e in events_result.get("items", []):
             if e.get("summary", "").startswith("Work"):
-                service.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute()
+                service.events().delete(
+                    calendarId=CALENDAR_ID, eventId=e["id"]
+                ).execute()
 
         created_event = (
             service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
@@ -92,6 +175,7 @@ class Shift:
         print(
             f"Created event for {self.date} - {self.position}: {created_event.get('htmlLink')}"
         )
+
 
 #####################################
 #####   CHROME  STUFF  UPDATED  #####
@@ -143,103 +227,68 @@ except Exception as e:
     print(f"Error submitting login form: {e}")
     browser.quit()
     exit(1)
-# Check for in case of security question prompt
+# try:
+#     qna = browser.find_element(By.ID, "sec_qna")
+#     qna.click()
+#     login_attempt = browser.find_element(By.XPATH, "//*[@type='submit']")
+#     login_attempt.submit()
+# except Exception as e:
+#     print(f"Error handling security question selection: {e}")
+#     browser.quit()
+#     exit(1)
 try:
-    print("Waiting briefly for security question option...")
-    WebDriverWait(browser, 5).until(  # shorter wait here
-        EC.presence_of_element_located((By.ID, "sec_qna"))
-    )
-except TimeoutException:
-    print("No security question prompt found, continuing login flow.")
-else:
-    print("Selecting Q+A button...")
-    try:
-        qna = browser.find_element(By.ID, "sec_qna")
-        qna.click()
-        login_attempt = browser.find_element(By.XPATH, "//*[@type='submit']")
-        login_attempt.submit()
-    except Exception as e:
-        print(f"Error handling security question selection: {e}")
-        browser.quit()
-        exit(1)
-
-    try:
-        print("Waiting for security question input...")
-        WebDriverWait(browser, timeout).until(
-            EC.presence_of_element_located((By.ID, "answer0"))
+    # Wait a short time for the skip button to appear
+    skip_button = WebDriverWait(browser, 3).until(
+        EC.presence_of_element_located(
+            (
+                By.XPATH,
+                "//a[contains(text(),'Skip') and @class[contains(.,'MuiLink-root')]]",
+            )
         )
-    except TimeoutException:
-        print("Timed out waiting for security question input.")
-        browser.quit()
-        exit(1)
+    )
+    skip_button.click()
+    print("Skip button clicked.")
+except TimeoutException:
+    print("Skip button not found, continuing...")
 
-    print("Answering security question...")
-    try:
-        answer = browser.find_element(By.ID, "answer0")
-        page_source = browser.page_source
-        if config["questions"]["question1keyword"] in page_source:
-            answer.send_keys(config["questions"]["question1answer"])
-        elif config["questions"]["question2keyword"] in page_source:
-            answer.send_keys(config["questions"]["question2answer"])
-        else:
-            answer.send_keys(config["questions"]["question3answer"])
-    except Exception as e:
-        print(f"Error answering security question: {e}")
-        browser.quit()
-        exit(1)
-
-    try:
-        submit = browser.find_element(By.ID, "submit-button")
-        submit.click()
-    except Exception as e:
-        print(f"Error submitting security question answer: {e}")
-        browser.quit()
-        exit(1)
 # check for in case of OTP prompt
 try:
     print("Checking for 2FA method selection (SMS/Call)...")
-    # Wait for the SMS button by looking for the button with text 'SMS'
     sms_button = WebDriverWait(browser, 5).until(
         EC.element_to_be_clickable((By.XPATH, "//button[.//div[text()='SMS']]"))
     )
     print("2FA SMS button found, clicking it...")
     sms_button.click()
-    # Now wait for OTP input to show up
-    WebDriverWait(browser, timeout).until(
-        EC.presence_of_element_located(
-            (By.ID, "otp_input")
-        )  # Replace with your OTP input ID
-    )
 except TimeoutException:
-    print("No 2FA method selection needed, continuing...")
-except Exception as e:
-    print(f"Error handling 2FA method selection: {e}")
-    browser.quit()
-    exit(1)
+    print("No 2FA method selection step needed.")
 
-# Then your OTP input handling logic here...
+# Now handle OTP input
 try:
-    print("Waiting for OTP input prompt...")
-    otp_input = browser.find_element(
-        By.ID, "otp_input"
-    )  # Replace with actual OTP input ID
-    otp_code = input("Enter OTP code: ")
-    otp_input.send_keys(otp_code)
-    otp_submit = browser.find_element(
-        By.ID, "otp_submit_button"
-    )  # Replace with actual button ID
-    otp_submit.click()
-    # Wait for schedule page or next step to load
-    WebDriverWait(browser, timeout).until(
-        EC.presence_of_element_located((By.CLASS_NAME, "request_table_bordered"))
+    print("Waiting for OTP input field...")
+    otp_input = WebDriverWait(browser, 20).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='tel']"))
     )
-    print("OTP verified, continuing...")
+    otp_code = input("Enter OTP code: ").strip()
+    otp_input.send_keys(otp_code)
+
+    otp_submit = WebDriverWait(browser, 5).until(
+        EC.element_to_be_clickable((By.ID, "submit-button"))
+    )
+    otp_submit.click()
+
+    # Confirm OTP success by checking for next page element
+    # WebDriverWait(browser, 15).until(
+    #     EC.presence_of_element_located((By.CLASS_NAME, "request_table_bordered"))
+    # )
+    # print("OTP verified, continuing...")
+
 except TimeoutException:
-    print("No OTP prompt detected, continuing...")
+    print("No OTP step detected, continuing...")
 except Exception as e:
     print(f"Error handling OTP: {e}")
     browser.quit()
     exit(1)
+# Wait for the page to load after login
 try:
     print("Waiting for 'My Schedule' button...")
     schedule_btn = WebDriverWait(browser, timeout).until(
@@ -249,84 +298,20 @@ try:
     )
     schedule_btn.click()
     print("'My Schedule' button clicked, navigating to schedule page.")
-except Exception as e:
-    print(f"Failed to find or click 'My Schedule' button: {e}")
-    browser.quit()
-    exit(1)
-
-def parse_shift_label(label):
-    """
-    Parse the aria-label text from a shift element to extract shift info.
-    """
-    # Regex to capture:
-    # 1) position: anything before ' shift from '
-    # 2) start_time: time after ' shift from ' and before ' to '
-    # 3) end_time: time after ' to ' and before ' at location '
-    # 4) location: digits after ' at location ' and before ' on '
-    pattern = r"^(.*?) shift from (\d{1,2}:\d{2}[AP]M) to (\d{1,2}:\d{2}[AP]M) at location (\d+) on .*$"
-    match = re.match(pattern, label)
-    if not match:
-        raise ValueError(f"Could not parse shift label: {label}")
-
-    position = match.group(1)
-    start_time = match.group(2)
-    end_time = match.group(3)
-    location = match.group(4)
-
-    return position, start_time, end_time, location
-
-
-def process_shifts_new():
-    schedule_container = WebDriverWait(browser, timeout).until(
+    # Wait a bit for schedule page to load fully
+    WebDriverWait(browser, timeout).until(
         EC.presence_of_element_located(
             (By.CSS_SELECTOR, 'ul[aria-label="your weekly schedule"]')
         )
     )
 
-    day_items = schedule_container.find_elements(
-        By.CSS_SELECTOR, 'li[data-cy^="weeklySchedListItem"]'
-    )
+    # Now call your function to process shifts
+    process_shifts_new()
 
-    for day_item in day_items:
-        date_elem = day_item.find_element(
-            By.CSS_SELECTOR, 'p[data-cy="nextSchedDisplaySegDateOnWeekly"]'
-        )
-        date_text = date_elem.text  # e.g., "Tuesday, August 5"
-
-        # Parse the date string to "YYYY-MM-DD"
-        date_obj = datetime.strptime(date_text, "%A, %B %d")
-        # NOTE: This returns a date without year, add year manually (e.g., this year)
-        date_obj = date_obj.replace(year=datetime.now().year)
-        formatted_date = date_obj.strftime("%Y-%m-%d")
-
-        shifts = day_item.find_elements(By.CSS_SELECTOR, 'a[aria-label*="shift"]')
-        if not shifts:
-            print(f"No shifts for {date_text}")
-            continue
-
-        for shift in shifts:
-            shift_label = shift.get_attribute("aria-label")
-            try:
-                position, start_time, end_time, location = parse_shift_label(
-                    shift_label
-                )
-            except ValueError as e:
-                print(e)
-                continue
-
-            # Create Shift object (adapt constructor as you have it)
-            shift_obj = Shift(
-                day=date_text,
-                date=formatted_date,
-                position=position,
-                start_time=start_time,
-                end_time=end_time,
-                location=location,  # if Shift accepts it, else ignore or extend Shift class
-            )
-            shift_obj.make_event()
-            print(
-                f"Created calendar event for {date_text} - {position} from {start_time} to {end_time} at location {location}"
-            )
+except Exception as e:
+    print(f"Failed to find or click 'My Schedule' button: {e}")
+    browser.quit()
+    exit(1)
 
 
 browser.quit()
