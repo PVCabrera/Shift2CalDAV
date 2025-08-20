@@ -354,3 +354,5 @@ credentials.cfg
 /geckodriver.exe
 /Output
 /test.iss
+token.json
+credentials.json
