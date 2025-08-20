@@ -22,9 +22,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+config = configparser.ConfigParser()
+config.read("credentials.cfg")
 
-CALENDAR_ID = "4dfeb9415d043a280c8f88c6f51c97e97c79577d2ace7c226620e66daa4b9040@group.calendar.google.com"
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+CALENDAR_ID = config["secrets"]["calendar_id"]
 
 
 def get_calendar_service():
