@@ -183,6 +183,7 @@ class Shift:
 #####   CHROME  STUFF  UPDATED  #####
 #####################################
 
+
 config = configparser.ConfigParser()
 config.read("credentials.cfg")
 
