@@ -136,8 +136,13 @@ class Shift:
         self.location = location  # Not used in event creation, but can be stored
 
     def make_event(self):
-        tz = pytz.timezone("America/Chicago")
-        
+        tz = config["options"].get("timezone", "US/Central")
+        try:
+            tz = pytz.timezone(tz)
+        except pytz.UnknownTimeZoneError:
+            print(f"Unknown timezone: {tz}, defaulting to US/Central")
+            tz = pytz.timezone("US/Central")        
+
         start_dt = tz.localize(datetime.strptime(f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S"))
         end_dt = tz.localize(datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S"))
 
