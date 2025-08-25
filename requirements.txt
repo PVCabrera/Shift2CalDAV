@@ -1,16 +1,17 @@
-﻿arrow==0.14.7
-caldav==0.6.2
-certifi==2019.11.28
-chardet==3.0.4
-ics==0.6
-idna==2.9
-lxml==4.6.3
-PySimpleGUI==4.16.0
-python-dateutil==2.8.1
-pytz==2019.3
-requests==2.23.0
-selenium==3.141.0
-six==1.14.0
-TatSu==4.4.0
-urllib3==1.26.5
-vobject==0.9.6.1
+﻿arrow>=1.2.3
+caldav>=0.11.0
+lxml>=4.9.0
+pytz>=2023.3
+python-dateutil>=2.8.2
+requests>=2.31.0
+selenium>=4.21.0
+vobject>=0.9.7
+
+# Google API dependencies
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.130.0
+
+# Optional:
+PySimpleGUI>=4.60.0  # For GUI
