@@ -43,7 +43,9 @@ def get_calendar_service():
             token.write(creds.to_json())
     return build("calendar", "v3", credentials=creds)
 
+
 service = get_calendar_service()
+
 
 def parse_shift_label(label):
     """
@@ -65,8 +67,6 @@ def parse_shift_label(label):
     location = match.group(4)
 
     return position, start_time, end_time, location
-
-
 
 
 def process_shifts_new():
@@ -141,20 +141,24 @@ class Shift:
             tz = pytz.timezone(tz)
         except pytz.UnknownTimeZoneError:
             print(f"Unknown timezone: {tz}, defaulting to US/Central")
-            tz = pytz.timezone("US/Central")        
+            tz = pytz.timezone("US/Central")
 
-        start_dt = tz.localize(datetime.strptime(f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S"))
-        end_dt = tz.localize(datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S"))
+        start_dt = tz.localize(
+            datetime.strptime(f"{self.date} {self.start_time}", "%Y-%m-%d %H:%M:%S")
+        )
+        end_dt = tz.localize(
+            datetime.strptime(f"{self.date} {self.end_time}", "%Y-%m-%d %H:%M:%S")
+        )
 
         event_body = {
             "summary": f"Work - {self.position}",
             "start": {
                 "dateTime": start_dt.isoformat(),
-                "timeZone": "America/Chicago",  # Adjust to your timezone
+                "timeZone": tz.zone,
             },
             "end": {
                 "dateTime": end_dt.isoformat(),
-                "timeZone": "America/Chicago",
+                "timeZone": tz.zone,
             },
         }
 
@@ -297,6 +301,29 @@ except Exception as e:
     browser.quit()
     exit(1)
 # Wait for the page to load after login
+# try:
+#     print("Waiting for 'My Schedule' button...")
+#     schedule_btn = WebDriverWait(browser, timeout).until(
+#         EC.element_to_be_clickable(
+#             (By.CSS_SELECTOR, 'a[data-cy="scheduleBtnBottomNav"]')
+#         )
+#     )
+#     schedule_btn.click()
+#     print("'My Schedule' button clicked, navigating to schedule page.")
+#     # Wait a bit for schedule page to load fully
+#     WebDriverWait(browser, timeout).until(
+#         EC.presence_of_element_located(
+#             (By.CSS_SELECTOR, 'ul[aria-label="your weekly schedule"]')
+#         )
+#     )
+
+#     # Now call your function to process shifts
+#     process_shifts_new()
+
+# except Exception as e:
+#     print(f"Failed to find or click 'My Schedule' button: {e}")
+#     browser.quit()
+#     exit(1)
 try:
     print("Waiting for 'My Schedule' button...")
     schedule_btn = WebDriverWait(browser, timeout).until(
@@ -306,15 +333,34 @@ try:
     )
     schedule_btn.click()
     print("'My Schedule' button clicked, navigating to schedule page.")
-    # Wait a bit for schedule page to load fully
+
+    # Wait for schedule page to load fully
     WebDriverWait(browser, timeout).until(
         EC.presence_of_element_located(
             (By.CSS_SELECTOR, 'ul[aria-label="your weekly schedule"]')
         )
     )
 
-    # Now call your function to process shifts
-    process_shifts_new()
+    # --- NEW: loop through weeks ---
+    weeks_to_fetch = int(config["options"].get("weeks_to_fetch", 1))
+    for week in range(weeks_to_fetch):
+        print(f"\n📅 Processing week {week+1} of {weeks_to_fetch}...")
+        process_shifts_new()
+
+        # If more weeks remain, click "next week"
+        if week < weeks_to_fetch - 1:
+            try:
+                next_week_btn = WebDriverWait(browser, timeout).until(
+                    EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, 'button[data-cy="weekForwardBtn"]')
+                    )
+                )
+                next_week_btn.click()
+                print("➡️ Moved to next week...")
+                time.sleep(2)  # allow page to load
+            except TimeoutException:
+                print("⚠️ Could not find 'Next Week' button, stopping early.")
+                break
 
 except Exception as e:
     print(f"Failed to find or click 'My Schedule' button: {e}")
